@@ -25,7 +25,7 @@ Before installing, ensure your machine meets the hardware and software requireme
 
 ```bash
 # 1. Download the latest release
-curl -L -o smartcommit githublink
+curl -L -o smartcommit https://github.com/brazill7/smart-commit.git/releases/latest/download/smartcommit
 
 # 2. Make the file executable
 chmod +x smartcommit
