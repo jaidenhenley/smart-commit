@@ -30,26 +30,31 @@ async def generate_commit_message(developer_context=None):
 
     # Inject it into the Prompt
     prompt = f"""
-    You are a strictly formatted Git commit generator. Analyze the following code diff and generate a single commit message using the Conventional Commits standard.
+    You are a strictly formatted Git commit generator. Analyze the following code diff and generate a single commit message.
 
-    Allowed prefixes: feat:, fix:, docs:, style:, refactor:, chore:
+    Allowed prefixes: [Feature], [Bug], [Clean], [Patch]
+
+    Prefix guide:
+    - [Feature]: new functionality or capability added
+    - [Bug]: a bug fix or error correction
+    - [Clean]: refactoring, formatting, or code cleanup with no behavior change
+    - [Patch]: small updates, dependency bumps, config changes, or minor fixes
 
     Rules:
     - ONLY output the commit message. No conversational text.
     - Do not wrap the output in quotes.
+    - Start the message with one of the allowed prefixes.
     - Incorporate any additional context provided by the developer.
 
     Examples:
     Diff: + function calculateTotal(a, b) {{ return a + b; }}
-    Output: feat: add calculateTotal function, which adds a and b and returns the total.
+    Output: [Feature] add calculateTotal function that adds a and b and returns the total
 
     Actual Diff to analyze:
     {diff}
     {context_instruction}
-    
-    Analyze the following code diff and generate a single commit message using the Conventional Commits standard.
 
-    Allowed prefixes: feat:, fix:, docs:, style:, refactor:, chore:
+    Analyze the diff and generate a single commit message starting with one of: [Feature], [Bug], [Clean], [Patch]
 
     Output:
     """
