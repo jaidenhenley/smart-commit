@@ -64,14 +64,41 @@ async def generate_commit_message(developer_context=None):
 
     commit_msg = response.strip().strip('"').strip("'")
 
-    print(f"\nSuggested commit: \033[92m{commit_msg}\033[0m")
-    user_input = input("Accept this commit message? (y/n): ")
+    while True:
+        print(f"\nSuggested commit: \033[92m{commit_msg}\033[0m")
+        user_input = input("Accept? (y), give feedback to regenerate, or abort (n): ").strip()
 
-    if user_input.lower() == 'y':
-        subprocess.run(['git', 'commit', '-m', commit_msg])
-        print("✅ Committed successfully!")
-    else:
-        print("Commit aborted.")
+        if user_input.lower() == 'y':
+            subprocess.run(['git', 'commit', '-m', commit_msg])
+            print("✅ Committed successfully!")
+            break
+        elif user_input.lower() == 'n':
+            print("Commit aborted.")
+            break
+        elif user_input:
+            # Treat any other input as feedback — regenerate with it
+            feedback_prompt = f"""
+    You are a strictly formatted Git commit generator. You previously suggested a commit message that the developer wants revised.
+
+    Previous message: {commit_msg}
+    Developer feedback: "{user_input}"
+
+    Allowed prefixes: [Feature], [Bug], [Clean], [Patch]
+
+    Rules:
+    - ONLY output the commit message. No conversational text.
+    - Do not wrap the output in quotes.
+    - Start the message with one of the allowed prefixes.
+    - Apply the developer's feedback to improve the message.
+
+    Actual Diff for reference:
+    {diff}
+
+    Output:
+    """
+            print("Regenerating...")
+            response = await session.respond(feedback_prompt)
+            commit_msg = response.strip().strip('"').strip("'")
 
 
 if __name__ == "__main__":
