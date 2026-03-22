@@ -30,7 +30,7 @@ async def generate_commit_message(developer_context=None):
 
     # Inject it into the Prompt
     prompt = f"""
-    You are a strictly formatted Git commit generator. Analyze the following code diff and generate a single commit message.
+    You are a strictly formatted Git commit generator. Analyze the following code diff and generate a detailed commit message.
 
     Allowed prefixes: [Feature], [Bug], [Clean], [Patch]
 
@@ -40,21 +40,31 @@ async def generate_commit_message(developer_context=None):
     - [Clean]: refactoring, formatting, or code cleanup with no behavior change
     - [Patch]: small updates, dependency bumps, config changes, or minor fixes
 
+    Format:
+    Line 1: [Prefix] Short summary title
+    Lines 2+: Bullet list of completed changes using "- " prefix
+
     Rules:
     - ONLY output the commit message. No conversational text.
     - Do not wrap the output in quotes.
     - Start the message with one of the allowed prefixes.
     - Incorporate any additional context provided by the developer.
+    - Each bullet is a concise completed action (e.g. "Added X", "Removed Y", "Fixed Z")
+    - Only include bullets for things actually in the diff — no filler.
 
-    Examples:
+    Example:
     Diff: + function calculateTotal(a, b) {{ return a + b; }}
-    Output: [Feature] add calculateTotal function that adds a and b and returns the total
+    Output:
+    [Feature] Add checkout total calculation
+
+    - Added calculateTotal(a, b) utility function
+    - Integrated calculateTotal into the checkout flow
 
     Actual Diff to analyze:
     {diff}
     {context_instruction}
 
-    Analyze the diff and generate a single commit message starting with one of: [Feature], [Bug], [Clean], [Patch]
+    Analyze the diff and generate a detailed commit message starting with one of: [Feature], [Bug], [Clean], [Patch]
 
     Output:
     """
@@ -80,16 +90,24 @@ async def generate_commit_message(developer_context=None):
             feedback_prompt = f"""
     You are a strictly formatted Git commit generator. You previously suggested a commit message that the developer wants revised.
 
-    Previous message: {commit_msg}
+    Previous message:
+    {commit_msg}
+
     Developer feedback: "{user_input}"
 
     Allowed prefixes: [Feature], [Bug], [Clean], [Patch]
+
+    Format:
+    Line 1: [Prefix] Short summary title
+    Lines 2+: Bullet list of completed changes using "- " prefix
 
     Rules:
     - ONLY output the commit message. No conversational text.
     - Do not wrap the output in quotes.
     - Start the message with one of the allowed prefixes.
     - Apply the developer's feedback to improve the message.
+    - Each bullet is a concise completed action (e.g. "Added X", "Removed Y", "Fixed Z")
+    - Only include bullets for things actually in the diff — no filler.
 
     Actual Diff for reference:
     {diff}
