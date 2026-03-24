@@ -108,8 +108,9 @@ def build_prompt(diff_context, developer_context=None, previous_message=None, fe
         Lines 2+: Bullet list of completed changes using "- " prefix
 
         Rules:
-        - ONLY output the commit message. No conversational text.
-        - Do not wrap the output in quotes.
+        - ONLY output the commit message. No conversational text, no explanations.
+        - Do not wrap the output in quotes, backticks, or code fences.
+        - Do not output any template placeholders like {{diff}} or {{context}}.
         - Start the message with one of the allowed prefixes.
         - Use any additional developer context and feedback if provided.
         - The latest developer feedback has higher priority than the previous draft, earlier feedback, and your default wording preferences.
@@ -130,7 +131,13 @@ def build_prompt(diff_context, developer_context=None, previous_message=None, fe
 async def generate_response(prompt):
     session = fm.LanguageModelSession()
     response = await session.respond(prompt)
-    return response.strip().strip('"').strip("'")
+    response = response.strip().strip('"').strip("'")
+    # Strip markdown code fences the model sometimes wraps output in
+    if response.startswith('```'):
+        lines = response.split('\n')
+        end = len(lines) - 1 if lines[-1].strip() == '```' else len(lines)
+        response = '\n'.join(lines[1:end]).strip()
+    return response
 
 
 async def generate_commit_message(developer_context=None):
