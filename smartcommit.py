@@ -62,7 +62,7 @@ def build_diff_context():
 
 def build_prompt(diff_context, developer_context=None, previous_message=None, feedback_history=None):
     previous_message_section = ""
-    if previous_message:
+    if previous_message and not feedback_history:
         previous_message_section = (
             "\nPrevious draft to revise. Treat this as raw material, not something you need to preserve:\n"
             f"{previous_message}\n"
@@ -81,6 +81,10 @@ def build_prompt(diff_context, developer_context=None, previous_message=None, fe
             "\nLatest developer feedback. This is the highest-priority instruction and must materially change the draft if possible:\n"
             f"- {latest_feedback}\n"
         ]
+        sections.append(
+            "Generate a completely fresh commit message from the staged changes and feedback. "
+            "Do not preserve wording, structure, or bullets from any earlier draft unless the diff independently supports the same conclusion.\n"
+        )
 
         if earlier_feedback:
             earlier_feedback_lines = "\n".join(f"- {item}" for item in earlier_feedback[-(MAX_FEEDBACK_ITEMS - 1):])
@@ -113,9 +117,8 @@ def build_prompt(diff_context, developer_context=None, previous_message=None, fe
         - Do not output any template placeholders like {{diff}} or {{context}}.
         - Start the message with one of the allowed prefixes.
         - Use any additional developer context and feedback if provided.
-        - The latest developer feedback has higher priority than the previous draft, earlier feedback, and your default wording preferences.
-        - Revise aggressively when feedback asks for a different tone, level of detail, focus, or prefix.
-        - Keep parts of the previous draft only when they still fit the latest feedback.
+        - The latest developer feedback has higher priority than any earlier feedback and your default wording preferences.
+        - When feedback is provided, regenerate the entire message from scratch instead of editing or preserving the previous draft.
         - Each bullet is a concise completed action (e.g. "Added X", "Removed Y", "Fixed Z")
         - Only include bullets for things actually supported by the staged changes.
         - If the diff is truncated, stay grounded in the visible patch plus the file list/stats.
@@ -178,7 +181,6 @@ async def generate_commit_message(developer_context=None):
             feedback_prompt = build_prompt(
                 diff,
                 developer_context=developer_context,
-                previous_message=commit_msg,
                 feedback_history=feedback_history,
             )
             print("Regenerating...")
