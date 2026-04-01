@@ -6,7 +6,7 @@ import apple_fm_sdk as fm
 
 
 ALLOWED_PREFIXES = "[Feature], [Bug], [Clean], [Patch]"
-MAX_DIFF_CHARS = 12000
+MAX_DIFF_CHARS = 3000
 MAX_FEEDBACK_CHARS = 500
 MAX_FEEDBACK_ITEMS = 5
 
