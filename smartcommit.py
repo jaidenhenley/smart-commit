@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import subprocess
 import asyncio
@@ -20,11 +21,19 @@ except ImportError:
 
 ALLOWED_PREFIXES = "[Feature], [Bug], [Clean], [Patch]"
 MAX_DIFF_CHARS = 3000
-MAX_DIFF_CHARS = 3000
 MAX_FEEDBACK_CHARS = 500
 MAX_FEEDBACK_ITEMS = 5
 GEMINI_MODEL = "gemini-2.0-flash-lite"
 GROQ_MODEL = "llama-3.3-70b-versatile"
+PROTECTED_BRANCHES = {"main", "master", "develop", "production"}
+LARGE_COMMIT_FILE_THRESHOLD = 20
+LARGE_COMMIT_LINE_THRESHOLD = 500
+SENSITIVE_FILES = {".env", ".env.local", ".env.production", "id_rsa", "id_ed25519", "credentials.json", "secrets.json"}
+SENSITIVE_FILE_PATTERNS = [re.compile(r'\.pem$'), re.compile(r'\.key$'), re.compile(r'\.p12$')]
+SECRET_PATTERNS = [
+    re.compile(r'(?i)(api_key|secret|password|token|private_key)\s*=\s*["\']?\S+'),
+    re.compile(r'(?i)(AKIA|sk-|ghp_|xox[baprs]-)\S{10,}'),
+]
 
 
 def run_git_command(args):
@@ -50,7 +59,6 @@ def normalize_feedback(feedback):
 
 
 def split_diff_by_file(raw_diff):
-    """Split a raw git diff into a list of per-file diff sections."""
     sections = []
     current = []
     for line in raw_diff.split('\n'):
@@ -65,7 +73,6 @@ def split_diff_by_file(raw_diff):
 
 
 def chunk_file_diffs(file_diffs, max_chars):
-    """Group per-file diffs into chunks that each fit within max_chars."""
     chunks = []
     current_chunk = []
     current_size = 0
@@ -87,7 +94,6 @@ def chunk_file_diffs(file_diffs, max_chars):
         chunks.append('\n'.join(current_chunk))
 
     return chunks
-
 
 
 def extract_ticket_from_branch():
@@ -180,8 +186,7 @@ def build_chunk_summary_prompt(chunk_diff, chunk_index, total_chunks):
     ).strip()
 
 
-def build_merge_prompt(all_bullets, developer_context=None, previous_message=None, feedback_history=None,
-                       ticket=None):
+def build_merge_prompt(all_bullets, developer_context=None, previous_message=None, feedback_history=None, ticket=None):
     previous_message_section = ""
     if previous_message:
         previous_message_section = (
@@ -196,7 +201,6 @@ def build_merge_prompt(all_bullets, developer_context=None, previous_message=Non
     ticket_section = ""
     if ticket:
         ticket_section = f"\nTicket/issue reference detected from branch name: {ticket} — append it to the summary line if relevant.\n"
-
 
     feedback_section = ""
     if feedback_history:
@@ -254,8 +258,7 @@ def build_merge_prompt(all_bullets, developer_context=None, previous_message=Non
     ).strip()
 
 
-def build_prompt(diff_context, developer_context=None, previous_message=None, feedback_history=None,
-                 ticket=None):
+def build_prompt(diff_context, developer_context=None, previous_message=None, feedback_history=None, ticket=None):
     previous_message_section = ""
     if previous_message and not feedback_history:
         previous_message_section = (
@@ -338,7 +341,6 @@ def clean_response(text):
 
 
 def make_responder(provider, gemini_model=None, groq_client=None):
-    """Return an async callable that sends a prompt to the chosen provider."""
     async def respond(prompt):
         if provider == "gemini":
             loop = asyncio.get_event_loop()
@@ -376,7 +378,7 @@ async def summarize_chunks(chunks, respond):
     return "\n".join(results)
 
 
-async def generate_commit_message(developer_context=None, respond=None, chunking=True, provider_label=""):
+async def generate_commit_message(developer_context=None, respond=None, chunking=True, provider_label="", dry_run=False):
     raw_diff = run_git_command(['git', 'diff', '--staged', '--no-color', '--unified=0'])
 
     if not raw_diff:
@@ -398,9 +400,11 @@ async def generate_commit_message(developer_context=None, respond=None, chunking
             print("Commit aborted.")
             return
 
+    ticket = extract_ticket_from_branch()
+
     use_chunks = chunking and len(raw_diff) > MAX_DIFF_CHARS
     if use_chunks:
-        chunks = chunk_file_diffs(split_diff_by_file(raw_diff), MAX_DIFF_CHARS)
+        chunks = chunk_file_diffs(file_diffs, MAX_DIFF_CHARS)
 
     print("Analyzing diff...")
 
@@ -408,11 +412,11 @@ async def generate_commit_message(developer_context=None, respond=None, chunking
         combined_bullets = await summarize_chunks(chunks, respond)
         print("Merging chunk summaries...")
         commit_msg = await respond(
-            build_merge_prompt(combined_bullets, developer_context=developer_context)
+            build_merge_prompt(combined_bullets, developer_context=developer_context, ticket=ticket)
         )
     else:
         commit_msg = await respond(
-            build_prompt(raw_diff, developer_context=developer_context)
+            build_prompt(raw_diff, developer_context=developer_context, ticket=ticket)
         )
 
     feedback_history = []
@@ -427,10 +431,9 @@ async def generate_commit_message(developer_context=None, respond=None, chunking
             if dry_run:
                 print("\033[36m[dry-run] Would have committed with message above.\033[0m")
             else:
-                cmd = ['git', 'commit', '-m', commit_msg] + (extra_git_args or [])
-                result = subprocess.run(cmd)
+                result = subprocess.run(['git', 'commit', '-m', commit_msg])
                 if result.returncode == 0:
-                    print("Committed successfully!")
+                    print("✅ Committed successfully!")
                 else:
                     print(f"\033[31mCommit failed (exit {result.returncode}).\033[0m")
             break
@@ -494,37 +497,6 @@ def setup_gemini_provider(api_key):
     return make_responder("gemini", gemini_model=client)
 
 
-def setup_apple_provider():
-    model = fm.SystemLanguageModel()
-    is_available, reason = model.is_available()
-    if not is_available:
-        print(f"Apple Intelligence unavailable: {reason}")
-        sys.exit(1)
-    return make_responder("apple")
-
-
-def setup_groq_provider(api_key):
-    if not GROQ_AVAILABLE:
-        print("groq is not installed. Run: pip install groq")
-        sys.exit(1)
-    if not api_key:
-        print("Groq API key required. Use --groq-key or set the GROQ_API_KEY environment variable.")
-        sys.exit(1)
-    client = Groq(api_key=api_key)
-    return make_responder("groq", groq_client=client)
-
-
-def setup_gemini_provider(api_key):
-    if not GEMINI_AVAILABLE:
-        print("google-genai is not installed. Run: pip install google-genai")
-        sys.exit(1)
-    if not api_key:
-        print("Gemini API key required. Use --gemini-key or set the GEMINI_API_KEY environment variable.")
-        sys.exit(1)
-    client = genai.Client(api_key=api_key)
-    return make_responder("gemini", gemini_model=client)
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate smart Git commits using AI.")
     parser.add_argument(
@@ -550,6 +522,11 @@ if __name__ == "__main__":
         default=None,
         help='Gemini API key (or set GEMINI_API_KEY env var)'
     )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Preview the commit message without actually committing'
+    )
     args = parser.parse_args()
 
     if args.provider == "groq":
@@ -567,4 +544,10 @@ if __name__ == "__main__":
         chunking = True
         provider_label = "Generated by Apple Intelligence"
 
-    asyncio.run(generate_commit_message(developer_context=args.context, respond=respond, chunking=chunking, provider_label=provider_label))
+    asyncio.run(generate_commit_message(
+        developer_context=args.context,
+        respond=respond,
+        chunking=chunking,
+        provider_label=provider_label,
+        dry_run=args.dry_run,
+    ))
