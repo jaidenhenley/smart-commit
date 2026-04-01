@@ -230,8 +230,11 @@ def build_prompt(diff_context, developer_context=None, previous_message=None, fe
 
 
 async def generate_response(prompt):
-    session = fm.LanguageModelSession()
-    response = await session.respond(prompt)
+    try:
+        session = fm.LanguageModelSession()
+        response = await session.respond(prompt)
+    except Exception as e:
+        raise RuntimeError(f"Apple Intelligence model call failed: {e}") from e
     response = response.strip().strip('"').strip("'")
     # Strip markdown code fences the model sometimes wraps output in
     if response.startswith('```'):
@@ -255,12 +258,28 @@ async def summarize_chunks(chunks):
     return "\n".join(results)
 
 
-async def generate_commit_message(developer_context=None):
+def warn_unstaged_changes():
+    status = run_git_command(['git', 'status', '--short'])
+    unstaged = [
+        line for line in status.splitlines()
+        if line and line[0] == ' ' or (len(line) > 1 and line[1] in ('M', 'D'))
+    ]
+    untracked = [line for line in status.splitlines() if line.startswith('??')]
+    if unstaged:
+        print(f"\033[33mWarning: {len(unstaged)} file(s) have unstaged changes not included in this commit.\033[0m")
+    if untracked:
+        print(f"\033[33mWarning: {len(untracked)} untracked file(s) not included in this commit.\033[0m")
+
+
+async def generate_commit_message(developer_context=None, dry_run=False, extra_git_args=None):
     raw_diff = run_git_command(['git', 'diff', '--staged', '--no-color', '--unified=0'])
 
     if not raw_diff:
         print("No staged changes found. Run `git add` first!")
+        warn_unstaged_changes()
         return
+
+    warn_unstaged_changes()
 
     model = fm.SystemLanguageModel()
     is_available, reason = model.is_available()
@@ -292,8 +311,15 @@ async def generate_commit_message(developer_context=None):
         user_input = input("Accept? (y), give feedback to regenerate, or abort (n): ").strip()
 
         if user_input.lower() == 'y':
-            subprocess.run(['git', 'commit', '-m', commit_msg])
-            print("✅ Committed successfully!")
+            if dry_run:
+                print("\033[36m[dry-run] Would have committed with message above.\033[0m")
+            else:
+                cmd = ['git', 'commit', '-m', commit_msg] + (extra_git_args or [])
+                result = subprocess.run(cmd)
+                if result.returncode == 0:
+                    print("Committed successfully!")
+                else:
+                    print(f"\033[31mCommit failed (exit {result.returncode}).\033[0m")
             break
         elif user_input.lower() == 'n':
             print("Commit aborted.")
@@ -323,11 +349,23 @@ async def generate_commit_message(developer_context=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate smart Git commits using Apple Intelligence.")
+    parser = argparse.ArgumentParser(
+        description="Generate smart Git commits using Apple Intelligence.",
+        epilog="Any unrecognized arguments are forwarded to `git commit` (e.g. --signoff)."
+    )
     parser.add_argument(
         '-c', '--context',
         type=str,
         help='Additional context or intent to guide the AI (e.g., "fixes ticket #123")'
     )
-    args = parser.parse_args()
-    asyncio.run(generate_commit_message(developer_context=args.context))
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Preview the generated commit message without actually committing'
+    )
+    args, extra_git_args = parser.parse_known_args()
+    asyncio.run(generate_commit_message(
+        developer_context=args.context,
+        dry_run=args.dry_run,
+        extra_git_args=extra_git_args if extra_git_args else None,
+    ))
