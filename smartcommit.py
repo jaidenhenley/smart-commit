@@ -270,7 +270,7 @@ async def generate_commit_message(developer_context=None):
 
     file_diffs = split_diff_by_file(raw_diff)
     chunks = chunk_file_diffs(file_diffs, MAX_DIFF_CHARS)
-    use_chunks = len(chunks) > 1
+    use_chunks = len(raw_diff) > MAX_DIFF_CHARS
 
     print("Analyzing diff...")
 
