@@ -1,14 +1,29 @@
+import os
+import sys
 import subprocess
 import asyncio
 import argparse
 import textwrap
 import apple_fm_sdk as fm
 
+try:
+    from google import genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
 
 ALLOWED_PREFIXES = "[Feature], [Bug], [Clean], [Patch]"
 MAX_DIFF_CHARS = 3000
 MAX_FEEDBACK_CHARS = 500
 MAX_FEEDBACK_ITEMS = 5
+GEMINI_MODEL = "gemini-2.0-flash-lite"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
 def run_git_command(args):
@@ -229,24 +244,46 @@ def build_prompt(diff_context, developer_context=None, previous_message=None, fe
     ).strip()
 
 
-async def generate_response(prompt):
-    session = fm.LanguageModelSession()
-    response = await session.respond(prompt)
-    response = response.strip().strip('"').strip("'")
-    # Strip markdown code fences the model sometimes wraps output in
-    if response.startswith('```'):
-        lines = response.split('\n')
+def clean_response(text):
+    text = text.strip().strip('"').strip("'")
+    if text.startswith('```'):
+        lines = text.split('\n')
         end = len(lines) - 1 if lines[-1].strip() == '```' else len(lines)
-        response = '\n'.join(lines[1:end]).strip()
-    return response
+        text = '\n'.join(lines[1:end]).strip()
+    return text
 
 
-async def summarize_chunks(chunks):
-    """Summarize each chunk in parallel and return combined bullet text."""
+def make_responder(provider, gemini_model=None, groq_client=None):
+    """Return an async callable that sends a prompt to the chosen provider."""
+    async def respond(prompt):
+        if provider == "gemini":
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None, lambda: gemini_model.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+            )
+            return clean_response(response.text)
+        elif provider == "groq":
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None, lambda: groq_client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+            )
+            return clean_response(response.choices[0].message.content)
+        else:
+            session = fm.LanguageModelSession()
+            text = await session.respond(prompt)
+            return clean_response(text)
+
+    return respond
+
+
+async def summarize_chunks(chunks, respond):
     total = len(chunks)
     print(f"Diff is large — processing in {total} chunks...")
     tasks = [
-        generate_response(build_chunk_summary_prompt(chunk, i, total))
+        respond(build_chunk_summary_prompt(chunk, i, total))
         for i, chunk in enumerate(chunks)
     ]
     results = await asyncio.gather(*tasks)
@@ -255,33 +292,27 @@ async def summarize_chunks(chunks):
     return "\n".join(results)
 
 
-async def generate_commit_message(developer_context=None):
+async def generate_commit_message(developer_context=None, respond=None, chunking=True, provider_label=""):
     raw_diff = run_git_command(['git', 'diff', '--staged', '--no-color', '--unified=0'])
 
     if not raw_diff:
         print("No staged changes found. Run `git add` first!")
         return
 
-    model = fm.SystemLanguageModel()
-    is_available, reason = model.is_available()
-    if not is_available:
-        print(f"Apple Intelligence unavailable: {reason}")
-        return
-
-    file_diffs = split_diff_by_file(raw_diff)
-    chunks = chunk_file_diffs(file_diffs, MAX_DIFF_CHARS)
-    use_chunks = len(raw_diff) > MAX_DIFF_CHARS
+    use_chunks = chunking and len(raw_diff) > MAX_DIFF_CHARS
+    if use_chunks:
+        chunks = chunk_file_diffs(split_diff_by_file(raw_diff), MAX_DIFF_CHARS)
 
     print("Analyzing diff...")
 
     if use_chunks:
-        combined_bullets = await summarize_chunks(chunks)
+        combined_bullets = await summarize_chunks(chunks, respond)
         print("Merging chunk summaries...")
-        commit_msg = await generate_response(
+        commit_msg = await respond(
             build_merge_prompt(combined_bullets, developer_context=developer_context)
         )
     else:
-        commit_msg = await generate_response(
+        commit_msg = await respond(
             build_prompt(raw_diff, developer_context=developer_context)
         )
 
@@ -289,6 +320,8 @@ async def generate_commit_message(developer_context=None):
 
     while True:
         print(f"\nSuggested commit: \033[92m{commit_msg}\033[0m")
+        if provider_label:
+            print(f"\033[2m{provider_label}\033[0m")
         user_input = input("Accept? (y), give feedback to regenerate, or abort (n): ").strip()
 
         if user_input.lower() == 'y':
@@ -304,7 +337,7 @@ async def generate_commit_message(developer_context=None):
 
             print("Regenerating...")
             if use_chunks:
-                commit_msg = await generate_response(
+                commit_msg = await respond(
                     build_merge_prompt(
                         combined_bullets,
                         developer_context=developer_context,
@@ -313,7 +346,7 @@ async def generate_commit_message(developer_context=None):
                     )
                 )
             else:
-                commit_msg = await generate_response(
+                commit_msg = await respond(
                     build_prompt(
                         raw_diff,
                         developer_context=developer_context,
@@ -322,12 +355,74 @@ async def generate_commit_message(developer_context=None):
                 )
 
 
+def setup_apple_provider():
+    model = fm.SystemLanguageModel()
+    is_available, reason = model.is_available()
+    if not is_available:
+        print(f"Apple Intelligence unavailable: {reason}")
+        sys.exit(1)
+    return make_responder("apple")
+
+
+def setup_groq_provider(api_key):
+    if not GROQ_AVAILABLE:
+        print("groq is not installed. Run: pip install groq")
+        sys.exit(1)
+    if not api_key:
+        print("Groq API key required. Use --groq-key or set the GROQ_API_KEY environment variable.")
+        sys.exit(1)
+    client = Groq(api_key=api_key)
+    return make_responder("groq", groq_client=client)
+
+
+def setup_gemini_provider(api_key):
+    if not GEMINI_AVAILABLE:
+        print("google-genai is not installed. Run: pip install google-genai")
+        sys.exit(1)
+    if not api_key:
+        print("Gemini API key required. Use --gemini-key or set the GEMINI_API_KEY environment variable.")
+        sys.exit(1)
+    client = genai.Client(api_key=api_key)
+    return make_responder("gemini", gemini_model=client)
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate smart Git commits using Apple Intelligence.")
+    parser = argparse.ArgumentParser(description="Generate smart Git commits using AI.")
     parser.add_argument(
         '-c', '--context',
         type=str,
         help='Additional context or intent to guide the AI (e.g., "fixes ticket #123")'
     )
+    parser.add_argument(
+        '--provider',
+        choices=["apple", "gemini", "groq"],
+        default="groq",
+        help='AI provider to use (default: groq)'
+    )
+    parser.add_argument(
+        '--groq-key',
+        type=str,
+        default=None,
+        help='Groq API key (or set GROQ_API_KEY env var)'
+    )
+    parser.add_argument(
+        '--gemini-key',
+        type=str,
+        default=None,
+        help='Gemini API key (or set GEMINI_API_KEY env var)'
+    )
     args = parser.parse_args()
-    asyncio.run(generate_commit_message(developer_context=args.context))
+
+    if args.provider == "groq":
+        api_key = args.groq_key or os.environ.get("GROQ_API_KEY")
+        respond = setup_groq_provider(api_key)
+        chunking = False
+    elif args.provider == "gemini":
+        api_key = args.gemini_key or os.environ.get("GEMINI_API_KEY")
+        respond = setup_gemini_provider(api_key)
+        chunking = False
+    else:
+        respond = setup_apple_provider()
+        chunking = True
+
+    asyncio.run(generate_commit_message(developer_context=args.context, respond=respond, chunking=chunking))
