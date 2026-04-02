@@ -530,8 +530,8 @@ if __name__ == "__main__":
     parser.add_argument(
         '--provider',
         choices=["apple", "gemini", "groq", "ollama"],
-        default="groq",
-        help='AI provider to use (default: groq)'
+        default="ollama",
+        help='AI provider to use (default: ollama)'
     )
     parser.add_argument(
         '--groq-key',
