@@ -347,13 +347,17 @@ def build_prompt(diff_context, developer_context=None, previous_message=None, fe
     ).strip()
 
 
+SPECIAL_TOKENS = {"<|im_end|>", "<|im_start|>", "<|endoftext|>", "</s>", "<|eot_id|>"}
+
 def clean_response(text):
     text = text.strip().strip('"').strip("'")
+    for token in SPECIAL_TOKENS:
+        text = text.replace(token, "")
     if text.startswith('```'):
         lines = text.split('\n')
         end = len(lines) - 1 if lines[-1].strip() == '```' else len(lines)
         text = '\n'.join(lines[1:end]).strip()
-    return text
+    return text.strip()
 
 
 def make_responder(provider, gemini_model=None, groq_client=None, ollama_model=None, mlx_model=None, mlx_tokenizer=None):
