@@ -25,6 +25,12 @@ try:
 except ImportError:
     OLLAMA_AVAILABLE = False
 
+try:
+    from mlx_lm import load as mlx_load, generate as mlx_generate
+    MLX_AVAILABLE = True
+except ImportError:
+    MLX_AVAILABLE = False
+
 ALLOWED_PREFIXES = "[Feature], [Bug], [Clean], [Patch]"
 MAX_DIFF_CHARS = 3000
 MAX_FEEDBACK_CHARS = 500
@@ -32,6 +38,7 @@ MAX_FEEDBACK_ITEMS = 5
 GEMINI_MODEL = "gemini-2.0-flash-lite"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 OLLAMA_MODEL = "qwen2.5-coder"
+MLX_MODEL = "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
 PROTECTED_BRANCHES = {"main", "master", "develop", "production"}
 LARGE_COMMIT_FILE_THRESHOLD = 20
 LARGE_COMMIT_LINE_THRESHOLD = 500
@@ -255,6 +262,7 @@ def build_merge_prompt(all_bullets, developer_context=None, previous_message=Non
         - Start the message with one of the allowed prefixes.
         - Deduplicate and merge closely related bullets.
         - Each bullet is a concise completed action (e.g. "Added X", "Removed Y", "Fixed Z").
+        - Describe the PURPOSE of changes, never paste raw values, data, UUIDs, object dumps, or code from the diff.
         - Base the message ONLY on the extracted change bullets below. Do not copy or echo past commit messages.
         {context_section}{ticket_section}{previous_message_section}{feedback_section}
         Extracted changes from all chunks:
@@ -327,6 +335,7 @@ def build_prompt(diff_context, developer_context=None, previous_message=None, fe
         - The latest developer feedback has higher priority than any earlier feedback and your default wording preferences.
         - When feedback is provided, regenerate the entire message from scratch instead of editing or preserving the previous draft.
         - Each bullet is a concise completed action (e.g. "Added X", "Removed Y", "Fixed Z")
+        - Describe the PURPOSE of changes, never paste raw values, data, UUIDs, object dumps, or code from the diff.
         - Only include bullets for things actually supported by the staged changes.
         - Base the message ONLY on the staged diff below. Do not copy or echo past commit messages.
         {context_section}{ticket_section}{previous_message_section}{feedback_section}
@@ -347,7 +356,7 @@ def clean_response(text):
     return text
 
 
-def make_responder(provider, gemini_model=None, groq_client=None, ollama_model=None):
+def make_responder(provider, gemini_model=None, groq_client=None, ollama_model=None, mlx_model=None, mlx_tokenizer=None):
     async def respond(prompt):
         if provider == "gemini":
             loop = asyncio.get_event_loop()
@@ -373,6 +382,17 @@ def make_responder(provider, gemini_model=None, groq_client=None, ollama_model=N
                 )
             )
             return clean_response(response.message.content)
+        elif provider == "mlx":
+            loop = asyncio.get_event_loop()
+            def _mlx_run():
+                messages = [{"role": "user", "content": prompt}]
+                if hasattr(mlx_tokenizer, "apply_chat_template") and mlx_tokenizer.chat_template:
+                    formatted = mlx_tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+                else:
+                    formatted = prompt
+                return mlx_generate(mlx_model, mlx_tokenizer, prompt=formatted, max_tokens=2048, verbose=False)
+            text = await loop.run_in_executor(None, _mlx_run)
+            return clean_response(text)
         else:
             session = fm.LanguageModelSession()
             text = await session.respond(prompt)
@@ -502,6 +522,15 @@ def setup_groq_provider(api_key):
     return make_responder("groq", groq_client=client)
 
 
+def setup_mlx_provider(model):
+    if not MLX_AVAILABLE:
+        print("mlx-lm is not installed. Run: pip install mlx-lm")
+        sys.exit(1)
+    print(f"Loading {model}...")
+    model_weights, tokenizer = mlx_load(model)
+    return make_responder("mlx", mlx_model=model_weights, mlx_tokenizer=tokenizer)
+
+
 def setup_ollama_provider(model):
     if not OLLAMA_AVAILABLE:
         print("ollama is not installed. Run: pip install ollama")
@@ -529,9 +558,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         '--provider',
-        choices=["apple", "gemini", "groq", "ollama"],
-        default="ollama",
-        help='AI provider to use (default: ollama)'
+        choices=["apple", "gemini", "groq", "ollama", "mlx"],
+        default="mlx",
+        help='AI provider to use (default: mlx)'
     )
     parser.add_argument(
         '--groq-key',
@@ -552,13 +581,23 @@ if __name__ == "__main__":
         help=f'Ollama model to use (default: {OLLAMA_MODEL})'
     )
     parser.add_argument(
+        '--mlx-model',
+        type=str,
+        default=MLX_MODEL,
+        help=f'MLX model to use (default: {MLX_MODEL})'
+    )
+    parser.add_argument(
         '--dry-run',
         action='store_true',
         help='Preview the commit message without actually committing'
     )
     args = parser.parse_args()
 
-    if args.provider == "ollama":
+    if args.provider == "mlx":
+        respond = setup_mlx_provider(args.mlx_model)
+        chunking = False
+        provider_label = f"Generated by MLX · {args.mlx_model}"
+    elif args.provider == "ollama":
         respond = setup_ollama_provider(args.ollama_model)
         chunking = False
         provider_label = f"Generated by Ollama · {args.ollama_model}"
