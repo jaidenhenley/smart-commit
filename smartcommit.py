@@ -5,7 +5,11 @@ import subprocess
 import asyncio
 import argparse
 import textwrap
-import apple_fm_sdk as fm
+try:
+    import apple_fm_sdk as fm
+    APPLE_AVAILABLE = True
+except ImportError:
+    APPLE_AVAILABLE = False
 
 try:
     from google import genai
@@ -48,11 +52,41 @@ SECRET_PATTERNS = [
     re.compile(r'(?i)(api_key|secret|password|token|private_key)\s*=\s*["\']?\S+'),
     re.compile(r'(?i)(AKIA|sk-|ghp_|xox[baprs]-)\S{10,}'),
 ]
+PROGRESS_BAR_WIDTH = 30
 
 
 def run_git_command(args):
     result = subprocess.run(args, capture_output=True, text=True)
     return result.stdout.strip()
+
+
+class ProgressBar:
+    def __init__(self, total, label="Progress"):
+        self.total = max(total, 1)
+        self.current = 0
+        self.label = label
+        self._render()
+
+    def advance(self, step=1, label=None):
+        self.current = min(self.total, self.current + step)
+        if label:
+            self.label = label
+        self._render()
+
+    def finish(self, label=None):
+        self.current = self.total
+        if label:
+            self.label = label
+        self._render()
+        sys.stdout.write('\n')
+        sys.stdout.flush()
+
+    def _render(self):
+        filled = int(PROGRESS_BAR_WIDTH * self.current / self.total)
+        bar = '#' * filled + '-' * (PROGRESS_BAR_WIDTH - filled)
+        percent = int(100 * self.current / self.total)
+        sys.stdout.write(f"\r{self.label} [{bar}] {percent:3d}%")
+        sys.stdout.flush()
 
 
 def truncate_at_boundary(text, max_chars):
@@ -165,12 +199,12 @@ def check_large_commit(raw_diff, file_diffs):
 
 
 def warn_unstaged_changes():
-    status = run_git_command(['git', 'status', '--short'])
-    unstaged = [
-        line for line in status.splitlines()
-        if line and line[0] == ' ' or (len(line) > 1 and line[1] in ('M', 'D'))
+    unstaged = [line for line in run_git_command(['git', 'diff', '--name-only']).splitlines() if line]
+    untracked = [
+        line
+        for line in run_git_command(['git', 'ls-files', '--others', '--exclude-standard']).splitlines()
+        if line
     ]
-    untracked = [line for line in status.splitlines() if line.startswith('??')]
     if unstaged:
         print(f"\033[33mWarning: {len(unstaged)} file(s) have unstaged changes not included in this commit.\033[0m")
     if untracked:
@@ -405,17 +439,65 @@ def make_responder(provider, gemini_model=None, groq_client=None, ollama_model=N
     return respond
 
 
-async def summarize_chunks(chunks, respond):
+async def summarize_chunks(chunks, respond, progress=None):
     total = len(chunks)
-    print(f"Diff is large — processing in {total} chunks...")
+
+    async def summarize_chunk(index, chunk_diff):
+        summary = await respond(build_chunk_summary_prompt(chunk_diff, index, total))
+        return index, summary
+
     tasks = [
-        respond(build_chunk_summary_prompt(chunk, i, total))
+        asyncio.create_task(summarize_chunk(i, chunk))
         for i, chunk in enumerate(chunks)
     ]
-    results = await asyncio.gather(*tasks)
-    for i in range(total):
-        print(f"  Chunk {i + 1}/{total} analyzed.")
+    results = [None] * total
+
+    for completed, task in enumerate(asyncio.as_completed(tasks), start=1):
+        index, summary = await task
+        results[index] = summary
+        if progress:
+            progress.advance(label=f"Analyzing diff chunks ({completed}/{total})")
+
     return "\n".join(results)
+
+
+async def build_commit_message(raw_diff, file_diffs, developer_context, respond, ticket, feedback_history=None, combined_bullets=None, previous_message=None, chunking=True, progress_label="Analyzing diff"):
+    use_chunks = chunking and len(raw_diff) > MAX_DIFF_CHARS
+    progress_steps = 1
+
+    if use_chunks and combined_bullets is None:
+        chunks = chunk_file_diffs(file_diffs, MAX_DIFF_CHARS)
+        progress_steps = len(chunks) + 1
+    progress = ProgressBar(progress_steps, progress_label)
+
+    if use_chunks:
+        if combined_bullets is None:
+            combined_bullets = await summarize_chunks(chunks, respond, progress=progress)
+
+        progress.advance(0, label="Applying feedback" if feedback_history else "Merging chunk summaries")
+        commit_msg = await respond(
+            build_merge_prompt(
+                combined_bullets,
+                developer_context=developer_context,
+                previous_message=previous_message,
+                feedback_history=feedback_history,
+                ticket=ticket,
+            )
+        )
+        progress.finish("Updated commit draft ready" if feedback_history else "Commit draft ready")
+        return commit_msg, combined_bullets, use_chunks
+
+    commit_msg = await respond(
+        build_prompt(
+            raw_diff,
+            developer_context=developer_context,
+            previous_message=previous_message,
+            feedback_history=feedback_history,
+            ticket=ticket,
+        )
+    )
+    progress.finish("Updated commit draft ready" if feedback_history else "Commit draft ready")
+    return commit_msg, combined_bullets, use_chunks
 
 
 async def generate_commit_message(developer_context=None, respond=None, chunking=True, provider_label="", dry_run=False):
@@ -442,22 +524,14 @@ async def generate_commit_message(developer_context=None, respond=None, chunking
 
     ticket = extract_ticket_from_branch()
 
-    use_chunks = chunking and len(raw_diff) > MAX_DIFF_CHARS
-    if use_chunks:
-        chunks = chunk_file_diffs(file_diffs, MAX_DIFF_CHARS)
-
-    print("Analyzing diff...")
-
-    if use_chunks:
-        combined_bullets = await summarize_chunks(chunks, respond)
-        print("Merging chunk summaries...")
-        commit_msg = await respond(
-            build_merge_prompt(combined_bullets, developer_context=developer_context, ticket=ticket)
-        )
-    else:
-        commit_msg = await respond(
-            build_prompt(raw_diff, developer_context=developer_context, ticket=ticket)
-        )
+    commit_msg, combined_bullets, use_chunks = await build_commit_message(
+        raw_diff,
+        file_diffs,
+        developer_context,
+        respond,
+        ticket,
+        chunking=chunking,
+    )
 
     feedback_history = []
 
@@ -484,26 +558,18 @@ async def generate_commit_message(developer_context=None, respond=None, chunking
             feedback_history.append(normalize_feedback(user_input))
             feedback_history = feedback_history[-MAX_FEEDBACK_ITEMS:]
 
-            print("Regenerating...")
-            if use_chunks:
-                commit_msg = await respond(
-                    build_merge_prompt(
-                        combined_bullets,
-                        developer_context=developer_context,
-                        previous_message=commit_msg,
-                        feedback_history=feedback_history,
-                        ticket=ticket,
-                    )
-                )
-            else:
-                commit_msg = await respond(
-                    build_prompt(
-                        raw_diff,
-                        developer_context=developer_context,
-                        feedback_history=feedback_history,
-                        ticket=ticket,
-                    )
-                )
+            commit_msg, _, _ = await build_commit_message(
+                raw_diff,
+                file_diffs,
+                developer_context,
+                respond,
+                ticket,
+                feedback_history=feedback_history,
+                combined_bullets=combined_bullets,
+                previous_message=commit_msg,
+                chunking=chunking,
+                progress_label="Regenerating commit message",
+            )
 
 
 def setup_apple_provider():
