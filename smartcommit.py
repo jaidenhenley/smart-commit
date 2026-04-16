@@ -332,8 +332,7 @@ def build_prompt(diff_context, developer_context=None, previous_message=None, fe
             "\nLatest developer feedback. This is the highest-priority instruction and must materially change the draft if possible:\n"
             f"- {latest_feedback}\n"
             "Generate a completely fresh commit message from the staged changes and feedback. "
-            "Do not
-              preserve wording, structure, or bullets from any earlier draft unless the diff independently supports the same conclusion.\n"
+            "Do not preserve wording, structure, or bullets from any earlier draft unless the diff independently supports the same conclusion.\n"
         ]
 
         if earlier_feedback:
