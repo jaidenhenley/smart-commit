@@ -1,75 +1,78 @@
 # Git SmartCommit CLI
 
-**AI-powered Git commit generation running *100% locally* on your Mac using Apple Intelligence.**
+**AI-powered Git commit generation running 100% locally on Apple Silicon via [MLX](https://github.com/ml-explore/mlx).**
 
-SmartCommit is a lightweight CLI tool that analyzes your staged Git changes and generates concise, professional [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, etc.). 
+SmartCommit analyzes your staged Git changes and generates a [Conventional Commits](https://www.conventionalcommits.org/) message (`feat:`, `fix:`, `refactor:`, ...) with a bullet-list body — validated in code, not just prompted.
 
-Because it runs completely on-device using the Apple Foundation Models SDK, it offers massive advantages over cloud-based AI tools:
+* **Private:** your diff never leaves your machine.
+* **Free:** no API keys or subscriptions; runs Qwen2.5-Coder-7B-Instruct (4-bit) on-device.
+* **Reliable output:** the message format is enforced by a validator. If the model misbehaves twice, a deterministic fallback message is built from the file summaries — you always get a valid commit message, never garbage.
 
-* **Privacy-First:** Your codebase never leaves your machine. Perfect for enterprise, proprietary, or sensitive code.
-* **Zero API Costs:** No OpenAI API keys or GitHub Copilot subscriptions required. It uses the AI already built into your Mac.
-* ️**Fast:** Powered natively by Apple Silicon neural engines for instant inference.
+## How it works
 
----
+1. Grabs the staged diff and strips lockfiles, generated/binary files, and whitespace-only hunks (excluded files are still named to the model, their content is never sent).
+2. If the cleaned diff fits the context budget, it's sent in one pass. Larger diffs are summarized per file (split at hunk boundaries — never truncated mid-diff), then the commit message is synthesized from the summaries.
+3. The current branch name is included as intent context.
+4. The output is validated against the Conventional Commits format. Invalid → one retry with the errors appended → deterministic fallback.
+5. You accept (`y`), abort (`n`), or type feedback to regenerate.
 
-##  Prerequisites
+## Prerequisites
 
-Before installing, ensure your machine meets the hardware and software requirements for local Apple Intelligence:
-* **Hardware:** Apple Silicon Mac (M1 chip or newer).
-* **OS:** macOS 15.0 (Sequoia) or newer.
-* **Settings:** Apple Intelligence must be enabled on your Mac.
-
----
+* Apple Silicon Mac (M1 or newer; 16GB+ RAM recommended)
+* Python 3.10+
+* `pip install mlx-lm` (the only dependency)
 
 ## Installation
 
 ```bash
-# 1. Download the latest release
-curl -fsSL -o smartcommit https://github.com/brazill7/smart-commit/releases/latest/download/smartcommit
-
-# 2. Make the file executable
-chmod +x smartcommit
-
-# 3. Clear the macOS Gatekeeper quarantine flag (required for unsigned binaries)
-xattr -d com.apple.quarantine smartcommit
-
-# 4. Move it to your local bin so it can be run from anywhere
-sudo mv smartcommit /usr/local/bin/
-
-### (Optional) Set up a Git Alias
-If you want to use this tool natively within Git (e.g., typing `git sc` or `git smart-commit` etc. ), you can add a global alias:
-
-git config --global alias.sc '!smartcommit'
-git config --global alias.smart-commit '!smartcommit'
+git clone https://github.com/brazill7/smart-commit.git
+cd smart-commit
+pip install mlx-lm
 ```
 
----
+Optional alias so `sc` works anywhere:
+
+```bash
+alias sc='python3 /path/to/smart-commit/smartcommit.py'
+```
+
+The model weights (~4.3GB) download automatically on first run.
 
 ## Usage
 
-Make sure you have staged your changes (`git add .`) before running the tool.
+Stage your changes first (`git add`), then:
 
-### Option A: Using the Standalone Command
-If you skipped the alias step, you can just call the tool directly in your repository:
+```bash
+sc
+```
 
-`smartcommit`
+With extra context for the model:
 
-To provide custom context to the AI (like explaining  *why*  you made a change), use the `-c` flag:
+```bash
+sc -c "fixes the race condition on the login screen"
+```
 
-`smartcommit -c "race condition on the login screen"`
+Preview without committing:
 
+```bash
+sc --dry-run
+```
 
-### Option B: Using the Git Alias
-If you configured the `git smart-commit` alias, you can use it just like a native Git command:
+### Configuration
 
-`git smart-commit`
+| Option | Env var | Default |
+|---|---|---|
+| `--model` | `SMARTCOMMIT_MODEL` | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` |
+| `--timeout` | `SMARTCOMMIT_TIMEOUT` | `120` seconds |
 
-With custom context:
+**Example output:**
 
-`git smart-commit -c "refactored the login auth flow"`
+```
+Suggested commit:
+feat: add diff preprocessing and output validation
 
-
-**Example Output:**
-> Analyzing diff...
-> Suggested commit: **fix: resolve race condition in login flow**
-> Accept this commit message? (y/n): 
+- Filter lockfiles and generated files before sending diffs to the model
+- Summarize large diffs per file instead of truncating
+- Validate the commit format in code with a deterministic fallback
+Accept? (y), give feedback to regenerate, or abort (n):
+```
